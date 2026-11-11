@@ -4,16 +4,21 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.res.AssetManager
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.storage.StorageManager
 import android.provider.Settings
+import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
@@ -24,17 +29,18 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.*
 import androidx.compose.ui.focus.*
-import androidx.compose.ui.graphics.*
-import androidx.compose.ui.input.key.*
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.animation.core.*
-import android.view.View
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
@@ -50,20 +56,39 @@ import kotlinx.coroutines.*
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.math.PI
+import kotlin.math.sin
 
-// ---------- Theme ----------
-val Bg = Color(0xFF0B0D12); val CardC = Color(0xFF161A23); val Hi = Color(0xFF2A3047)
-val Accent = Color(0xFF8B6CFF); val Cyan = Color(0xFF22D3EE); val Dim = Color(0xFF9AA3B8)
+// ---------- Theme: flat dark gray + white ----------
+val Bg = Color(0xFF191919); val Panel = Color(0xFF242424); val Bar = Color(0xFF2D2D2D)
+val Line = Color(0xFF3D3D3D); val Sel = Color(0xFF3F3F3F); val Dim = Color(0xFF9A9A9A); val Ic = Color(0xFFDADADA)
+var HeadFont: FontFamily = FontFamily.Default
 lateinit var loader: ImageLoader
 
+// ---------- Sound effects (generated, no files) ----------
+object Sfx {
+    private fun tone(f: Float, ms: Int, vol: Float): ShortArray {
+        val n = 44100 * ms / 1000
+        return ShortArray(n) { i -> (sin(2 * PI * f * i / 44100) * Short.MAX_VALUE * vol * (1 - i.toFloat() / n)).toInt().toShort() }
+    }
+    private val snd: Map<String, ShortArray> by lazy {
+        mapOf("move" to tone(1100f, 22, .12f), "ok" to tone(1400f, 70, .35f), "back" to tone(700f, 90, .35f),
+            "play" to tone(900f, 60, .35f) + tone(1500f, 100, .35f))
+    }
+    fun play(k: String) {
+        val d = snd[k] ?: return
+        Thread {
+            try {
+                val t = AudioTrack(AudioManager.STREAM_MUSIC, 44100, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT, d.size * 2, AudioTrack.MODE_STATIC)
+                t.write(d, 0, d.size); t.play(); Thread.sleep(260); t.release()
+            } catch (_: Exception) {}
+        }.start()
+    }
+}
+
 // ---------- Model ----------
-enum class Kind(val icon: String, val label: String) {
-    DIR("📁", "پوشه"), VIDEO("🎬", "ویدیو"), AUDIO("🎵", "موسیقی"), IMAGE("🖼️", "تصویر"), OTHER("📄", "فایل")
-}
-enum class Sec(val icon: String, val label: String, val kind: Kind?) {
-    ALL("🗂️", "همه فایل‌ها", null), VIDEO("🎬", "ویدیوها", Kind.VIDEO),
-    AUDIO("🎵", "موسیقی", Kind.AUDIO), IMAGE("🖼️", "عکس‌ها", Kind.IMAGE)
-}
+enum class Kind(val label: String) { DIR("پوشه"), VIDEO("ویدیو"), AUDIO("موسیقی"), IMAGE("تصویر"), OTHER("فایل") }
+enum class Sec(val label: String, val kind: Kind?) { ALL("همه فایل‌ها", null), VIDEO("ویدیوها", Kind.VIDEO), AUDIO("موسیقی", Kind.AUDIO), IMAGE("عکس‌ها", Kind.IMAGE) }
 fun File.kind(): Kind = if (isDirectory) Kind.DIR else when (extension.lowercase()) {
     "mp4", "mkv", "avi", "mov", "webm", "ts", "m4v", "wmv", "3gp", "mpg", "mpeg" -> Kind.VIDEO
     "mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma" -> Kind.AUDIO
@@ -75,10 +100,7 @@ fun fmtSize(b: Long): String = when {
     b >= 1L shl 20 -> "%.1f MB".format(b / 1048576.0)
     else -> "%d KB".format(b / 1024)
 }
-fun detail(f: File): String {
-    val d = SimpleDateFormat("yyyy/MM/dd  HH:mm", Locale.US).format(Date(f.lastModified()))
-    return if (f.isDirectory) d else "${fmtSize(f.length())}  •  ${f.extension.uppercase()}  •  $d"
-}
+fun dateOf(f: File): String = SimpleDateFormat("yyyy/MM/dd  HH:mm", Locale.US).format(Date(f.lastModified()))
 fun drives(ctx: Context): List<Pair<String, File>> {
     val sm = ctx.getSystemService(StorageManager::class.java)
     return sm.storageVolumes.filter { it.isRemovable && it.state == Environment.MEDIA_MOUNTED }.mapNotNull { v ->
@@ -100,23 +122,23 @@ fun askAccess(a: Activity) {
         try { a.requestPermissions(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), 1) } catch (_: Exception) {}
     }
 }
+fun fam(a: AssetManager, vararg n: Pair<String, FontWeight>): FontFamily? = try {
+    val l = a.list("fonts")?.toList() ?: emptyList()
+    if (n.all { it.first in l }) FontFamily(n.map { Font("fonts/" + it.first, a, it.second) }) else null
+} catch (e: Exception) { null }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(s: Bundle?) {
         super.onCreate(s)
         loader = ImageLoader.Builder(applicationContext).components { add(VideoFrameDecoder.Factory()) }.crossfade(true).build()
         askAccess(this)
-        val ff = try {
-            val l = assets.list("fonts")?.toList() ?: emptyList()
-            if ("Vazirmatn-Regular.ttf" in l && "Vazirmatn-Bold.ttf" in l)
-                FontFamily(Font("fonts/Vazirmatn-Regular.ttf", assets, FontWeight.Normal), Font("fonts/Vazirmatn-Bold.ttf", assets, FontWeight.Bold))
-            else FontFamily.Default
-        } catch (e: Exception) { FontFamily.Default }
+        val body = fam(assets, "Vazirmatn-Regular.ttf" to FontWeight.Normal, "Vazirmatn-Bold.ttf" to FontWeight.Bold) ?: FontFamily.Default
+        HeadFont = fam(assets, "ArefRuqaa-Regular.ttf" to FontWeight.Normal, "ArefRuqaa-Bold.ttf" to FontWeight.Bold) ?: body
         setContent {
             val t = Typography()
-            MaterialTheme(colorScheme = darkColorScheme(primary = Accent, background = Bg, surface = CardC),
-                typography = t.copy(bodyLarge = t.bodyLarge.copy(fontFamily = ff))) {
-                CompositionLocalProvider(LocalLayoutDirection provides androidx.compose.ui.unit.LayoutDirection.Rtl) {
+            MaterialTheme(colorScheme = darkColorScheme(primary = Color.White, background = Bg, surface = Panel),
+                typography = t.copy(bodyLarge = t.bodyLarge.copy(fontFamily = body))) {
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
                     Surface(Modifier.fillMaxSize(), color = Bg) { App() }
                 }
             }
@@ -124,33 +146,150 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// ---------- TV focus helper ----------
+// ---------- Helpers ----------
 @Composable
-fun Modifier.tv(base: Color = CardC, shape: RoundedCornerShape = RoundedCornerShape(20.dp), onClick: () -> Unit): Modifier {
+fun Modifier.tv(base: Color = Color.Transparent, shape: RoundedCornerShape = RoundedCornerShape(6.dp), grow: Boolean = false, onClick: () -> Unit): Modifier {
     var f by remember { mutableStateOf(false) }
-    val s by animateFloatAsState(if (f) 1.04f else 1f, label = "s")
-    return this.scale(s).onFocusChanged { f = it.isFocused }
-        .clip(shape).background(if (f) Hi else base)
-        .border(if (f) 3.dp else 0.dp, if (f) Accent else Color.Transparent, shape)
-        .clickable(onClick = onClick)
+    val s by animateFloatAsState(if (f && grow) 1.03f else 1f, tween(120), label = "s")
+    return this.scale(s).onFocusChanged { if (it.isFocused && !f) Sfx.play("move"); f = it.isFocused }
+        .clip(shape).background(if (f) Sel else base)
+        .border(if (f) 2.dp else 0.dp, if (f) Color.White else Color.Transparent, shape)
+        .clickable { Sfx.play("ok"); onClick() }
+}
+
+@Composable
+fun Modifier.enter(i: Int): Modifier {
+    val a = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { delay(((i % 8) * 40).toLong()); a.animateTo(1f, tween(350)) }
+    return this.graphicsLayer { alpha = a.value; translationY = (1f - a.value) * 40f }
+}
+
+fun Modifier.dots(): Modifier = this.background(Bg).drawBehind {
+    val g = 44.dp.toPx(); var x = g / 2
+    while (x < this.size.width) { var y = g / 2; while (y < this.size.height) { drawCircle(Color(0xFF2B2B2B), 2.dp.toPx(), Offset(x, y)); y += g }; x += g }
+}
+
+@Composable
+fun Glyph(k: Kind?, sz: Dp) = Canvas(Modifier.size(sz)) {
+    val w = this.size.width; val h = this.size.height; val c = Ic
+    when (k) {
+        Kind.DIR -> { drawRoundRect(c, Offset(0f, h * .22f), Size(w, h * .62f), CornerRadius(w * .08f)); drawRoundRect(c, Offset(0f, h * .12f), Size(w * .42f, h * .2f), CornerRadius(w * .06f)) }
+        Kind.VIDEO -> { drawRoundRect(c, Offset(0f, h * .2f), Size(w, h * .6f), CornerRadius(w * .1f))
+            drawPath(Path().apply { moveTo(w * .4f, h * .35f); lineTo(w * .66f, h * .5f); lineTo(w * .4f, h * .65f); close() }, Panel) }
+        Kind.AUDIO -> { drawCircle(c, w * .17f, Offset(w * .35f, h * .75f)); drawRect(c, Offset(w * .46f, h * .15f), Size(w * .1f, h * .6f)); drawRect(c, Offset(w * .46f, h * .15f), Size(w * .32f, h * .12f)) }
+        Kind.IMAGE -> { drawRoundRect(c, Offset(0f, h * .15f), Size(w, h * .7f), CornerRadius(w * .08f))
+            drawPath(Path().apply { moveTo(w * .1f, h * .8f); lineTo(w * .4f, h * .45f); lineTo(w * .6f, h * .68f); lineTo(w * .75f, h * .55f); lineTo(w * .92f, h * .8f); close() }, Panel)
+            drawCircle(Panel, w * .07f, Offset(w * .75f, h * .33f)) }
+        Kind.OTHER -> { drawRoundRect(c, Offset(w * .15f, h * .08f), Size(w * .7f, h * .84f), CornerRadius(w * .06f))
+            for (i in 0..2) drawRect(Panel, Offset(w * .27f, h * (.3f + i * .17f)), Size(w * .46f, h * .06f)) }
+        null -> { drawRoundRect(c, Offset(0f, h * .3f), Size(w, h * .4f), CornerRadius(w * .08f)); drawRect(Panel, Offset(w * .1f, h * .5f), Size(w * .5f, h * .07f)); drawCircle(Panel, w * .05f, Offset(w * .85f, h * .5f)) }
+    }
+}
+
+@Composable
+fun Ico(n: String, sz: Dp = 24.dp, c: Color = Color.White) = Canvas(Modifier.size(sz)) {
+    val w = this.size.width; val h = this.size.height; val sw = w * .09f
+    fun tri(l: Boolean, x: Float, wd: Float) = drawPath(Path().apply {
+        if (l) { moveTo(x + wd, h * .22f); lineTo(x, h * .5f); lineTo(x + wd, h * .78f) } else { moveTo(x, h * .22f); lineTo(x + wd, h * .5f); lineTo(x, h * .78f) }; close() }, c)
+    when (n) {
+        "play" -> tri(false, w * .25f, w * .55f)
+        "pause" -> { drawRect(c, Offset(w * .22f, h * .2f), Size(w * .18f, h * .6f)); drawRect(c, Offset(w * .6f, h * .2f), Size(w * .18f, h * .6f)) }
+        "prev" -> { drawRect(c, Offset(w * .2f, h * .22f), Size(w * .12f, h * .56f)); tri(true, w * .36f, w * .44f) }
+        "next" -> { tri(false, w * .2f, w * .44f); drawRect(c, Offset(w * .68f, h * .22f), Size(w * .12f, h * .56f)) }
+        "rew" -> { tri(true, w * .08f, w * .4f); tri(true, w * .5f, w * .4f) }
+        "ff" -> { tri(false, w * .1f, w * .4f); tri(false, w * .52f, w * .4f) }
+        "back" -> { drawLine(c, Offset(w * .15f, h * .5f), Offset(w * .85f, h * .5f), sw); drawLine(c, Offset(w * .85f, h * .5f), Offset(w * .55f, h * .2f), sw); drawLine(c, Offset(w * .85f, h * .5f), Offset(w * .55f, h * .8f), sw) }
+        "home" -> { drawPath(Path().apply { moveTo(w * .1f, h * .5f); lineTo(w * .5f, h * .14f); lineTo(w * .9f, h * .5f) }, c, style = Stroke(sw))
+            drawRect(c, Offset(w * .24f, h * .5f), Size(w * .52f, h * .34f), style = Stroke(sw)) }
+        "shuffle" -> { drawLine(c, Offset(w * .12f, h * .3f), Offset(w * .88f, h * .7f), sw); drawLine(c, Offset(w * .12f, h * .7f), Offset(w * .88f, h * .3f), sw)
+            drawCircle(c, w * .08f, Offset(w * .88f, h * .7f)); drawCircle(c, w * .08f, Offset(w * .88f, h * .3f)) }
+        "repeat" -> { drawRoundRect(c, Offset(w * .12f, h * .27f), Size(w * .76f, h * .46f), CornerRadius(w * .2f), style = Stroke(sw))
+            drawPath(Path().apply { moveTo(w * .62f, h * .1f); lineTo(w * .82f, h * .27f); lineTo(w * .62f, h * .44f); close() }, c) }
+        else -> {}
+    }
+}
+
+@Composable
+fun Thumb(f: File, mod: Modifier) {
+    val k = f.kind()
+    Box(mod.background(Bar), contentAlignment = Alignment.Center) {
+        if (k == Kind.IMAGE || k == Kind.VIDEO)
+            AsyncImage(model = f, imageLoader = loader, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        else Glyph(k, 24.dp)
+        if (k == Kind.VIDEO) Box(Modifier.align(Alignment.BottomStart).padding(3.dp).clip(RoundedCornerShape(3.dp)).background(Color(0xAA000000)).padding(2.dp)) { Ico("play", 12.dp) }
+    }
+}
+
+@Composable
+fun Clock() {
+    var t by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) { while (true) { t = SimpleDateFormat("HH:mm", Locale.US).format(Date()); delay(10000) } }
+    Text(t, fontSize = 16.sp, color = Color.White)
+}
+
+@Composable
+fun Window(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Box(Modifier.fillMaxSize().dots().padding(20.dp)) {
+        Column(Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)).background(Panel).border(1.dp, Line, RoundedCornerShape(10.dp))) {
+            Row(Modifier.fillMaxWidth().background(Bar).padding(horizontal = 16.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                Glyph(Kind.DIR, 18.dp); Spacer(Modifier.width(10.dp))
+                Text(title, fontFamily = HeadFont, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1)
+                Clock(); Spacer(Modifier.width(18.dp)); Text("—     ▢     ✕", color = Dim, fontSize = 14.sp)
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
+            content()
+        }
+    }
+}
+
+@Composable
+fun StatusBar(text: String) {
+    Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
+    Row(Modifier.fillMaxWidth().background(Bar).padding(horizontal = 16.dp, vertical = 7.dp)) {
+        Text(text, color = Dim, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        Text("OK  باز کردن        Back  بازگشت", color = Dim, fontSize = 13.sp)
+    }
+}
+
+@Composable
+fun Splash() {
+    val a = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { Sfx.play("play"); a.animateTo(1f, tween(2000, easing = FastOutSlowInEasing)) }
+    Box(Modifier.fillMaxSize().dots()) {
+        Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.graphicsLayer { alpha = a.value; scaleX = .8f + .2f * a.value; scaleY = .8f + .2f * a.value }
+                .size(100.dp).border(3.dp, Color.White, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+                Text("▶\uFE0E", fontSize = 46.sp, color = Color.White)
+            }
+            Text("Flash Explorer", fontFamily = HeadFont, fontSize = 46.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 22.dp))
+            Text("مرورگر فایل فلش برای تلویزیون", color = Dim, fontSize = 17.sp, modifier = Modifier.padding(top = 4.dp, bottom = 34.dp))
+            Box(Modifier.width(340.dp).height(4.dp).background(Line)) { Box(Modifier.fillMaxWidth(a.value).fillMaxHeight().background(Color.White)) }
+            Text("در حال آماده‌سازی…", color = Dim, fontSize = 14.sp, modifier = Modifier.padding(top = 12.dp))
+        }
+        Text("Created By Mohammad Shaerpour", color = Dim, fontSize = 13.sp, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 26.dp))
+    }
 }
 
 // ---------- App ----------
 @Composable
 fun App() {
     val ctx = LocalContext.current
+    var splash by remember { mutableStateOf(true) }
     var drv by remember { mutableStateOf(listOf<Pair<String, File>>()) }
     var root by remember { mutableStateOf<Pair<String, File>?>(null) }
     var sec by remember { mutableStateOf(Sec.ALL) }
     var dir by remember { mutableStateOf<File?>(null) }
     var viewer by remember { mutableStateOf<Pair<List<File>, Int>?>(null) }
+    LaunchedEffect(Unit) { delay(2600); splash = false }
     LaunchedEffect(Unit) { while (true) { drv = withContext(Dispatchers.IO) { drives(ctx) }; delay(2500) } }
-    BackHandler(viewer != null) { viewer = null }
+    BackHandler(viewer != null) { Sfx.play("back"); viewer = null }
     BackHandler(viewer == null && root != null) {
+        Sfx.play("back")
         if (sec == Sec.ALL && dir != null && dir != root!!.second) dir = dir!!.parentFile else root = null
     }
     val v = viewer; val r = root
     when {
+        splash -> Splash()
         v != null -> when (v.first[v.second].kind()) {
             Kind.VIDEO -> VideoScreen(v.first, v.second)
             Kind.AUDIO -> AudioScreen(v.first, v.second)
@@ -166,57 +305,63 @@ fun App() {
 fun Home(drv: List<Pair<String, File>>, onPick: (Pair<String, File>) -> Unit) {
     val ctx = LocalContext.current
     val req = remember { FocusRequester() }
-    LaunchedEffect(drv.size) { delay(100); try { req.requestFocus() } catch (_: Exception) {} }
-    Box(Modifier.fillMaxSize().aurora(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Logo(96, true)
-            Text("Flash Player", fontSize = 48.sp, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.padding(top = 14.dp))
-            Text("فلش خود را انتخاب کنید", fontSize = 22.sp, color = Dim, modifier = Modifier.padding(top = 8.dp, bottom = 48.dp))
+    LaunchedEffect(drv.size) { delay(150); try { req.requestFocus() } catch (_: Exception) {} }
+    Window("این رایانه") {
+        Column(Modifier.weight(1f).fillMaxWidth().padding(32.dp)) {
+            Text("درایوها و دستگاه‌ها (${drv.size})", fontFamily = HeadFont, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(22.dp))
             if (drv.isEmpty()) {
-                Column(Modifier.focusRequester(req).tv(onClick = { askAccess(ctx as Activity) }).padding(40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("🔌", fontSize = 56.sp)
-                    Text("هیچ فلشی پیدا نشد", fontSize = 24.sp, fontWeight = FontWeight.Medium)
-                    Text("فلش را وصل کنید (OK = درخواست اجازه دسترسی)", color = Dim, fontSize = 16.sp, modifier = Modifier.padding(top = 8.dp))
+                Row(Modifier.focusRequester(req).tv(Bar) { askAccess(ctx as Activity) }.padding(22.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Glyph(null, 56.dp); Spacer(Modifier.width(18.dp))
+                    Column {
+                        Text("هیچ فلشی پیدا نشد", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        Text("فلش را وصل کنید  •  OK برای درخواست اجازه دسترسی", color = Dim, fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp))
+                    }
                 }
-            } else Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+            } else Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                 drv.forEachIndexed { i, d ->
-                    Column(Modifier.enter(i).width(300.dp).then(if (i == 0) Modifier.focusRequester(req) else Modifier)
-                        .tv(onClick = { onPick(d) }).padding(28.dp)) {
-                        Text("💾", fontSize = 56.sp)
-                        Text(d.first, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${fmtSize(d.second.freeSpace)} آزاد از ${fmtSize(d.second.totalSpace)}", color = Dim, fontSize = 15.sp, modifier = Modifier.padding(vertical = 8.dp))
-                        LinearProgressIndicator(progress = { 1f - d.second.freeSpace.toFloat() / d.second.totalSpace.coerceAtLeast(1) },
-                            color = Cyan, trackColor = Color(0xFF2A3047), modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)))
+                    Row(Modifier.enter(i).width(400.dp).then(if (i == 0) Modifier.focusRequester(req) else Modifier).tv(Bar) { onPick(d) }.padding(20.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Glyph(null, 64.dp); Spacer(Modifier.width(18.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(d.first, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            val used = 1f - d.second.freeSpace.toFloat() / d.second.totalSpace.coerceAtLeast(1)
+                            Box(Modifier.padding(vertical = 8.dp).fillMaxWidth().height(8.dp).background(Line)) { Box(Modifier.fillMaxWidth(used).fillMaxHeight().background(Ic)) }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("${fmtSize(d.second.freeSpace)} آزاد از ${fmtSize(d.second.totalSpace)}", color = Dim, fontSize = 14.sp)
+                                Text("${(used * 100).toInt()}٪ پر", color = Ic, fontSize = 12.sp, modifier = Modifier.border(1.dp, Line, RoundedCornerShape(4.dp)).padding(horizontal = 7.dp, vertical = 1.dp))
+                            }
+                        }
                     }
                 }
             }
         }
+        StatusBar("OK: باز کردن   •   Back: بازگشت")
     }
 }
 
 @Composable
-fun Thumb(f: File, mod: Modifier, fs: Int) {
-    val k = f.kind()
-    Box(mod.background(Color(0xFF1E2333)), contentAlignment = Alignment.Center) {
-        if (k == Kind.IMAGE || k == Kind.VIDEO)
-            AsyncImage(model = f, imageLoader = loader, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-        else Text(k.icon, fontSize = fs.sp)
-        if (k == Kind.VIDEO) Text("▶", fontSize = (fs / 2).sp, color = Color.White.copy(alpha = .85f))
+fun NavItem(k: Kind?, text: String, sel: Boolean, req: FocusRequester? = null, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().then(if (req != null) Modifier.focusRequester(req) else Modifier)
+        .tv(base = if (sel) Sel else Color.Transparent, onClick = onClick).padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+        Glyph(k, 22.dp); Spacer(Modifier.width(12.dp))
+        Text(text, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+        if (sel) Box(Modifier.width(3.dp).height(18.dp).background(Color.White))
     }
 }
 
 @Composable
-fun SideItem(text: String, selected: Boolean, req: FocusRequester? = null, onClick: () -> Unit) {
-    Text(text, fontSize = 20.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-        modifier = Modifier.fillMaxWidth().then(if (req != null) Modifier.focusRequester(req) else Modifier)
-            .tv(if (selected) Accent.copy(alpha = .35f) else Color.Transparent, RoundedCornerShape(14.dp), onClick).padding(horizontal = 18.dp, vertical = 14.dp))
+fun Tbtn(icon: String, label: String, onClick: () -> Unit) {
+    Row(Modifier.tv(Bar, RoundedCornerShape(6.dp), onClick = onClick).padding(horizontal = 14.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+        Ico(icon, 20.dp); Spacer(Modifier.width(8.dp)); Text(label, fontSize = 15.sp)
+    }
 }
 
 @Composable
 fun Browser(name: String, root: File, sec: Sec, dir: File, onSec: (Sec) -> Unit, onDir: (File) -> Unit,
-            onChange: () -> Unit, onOpen: (List<File>, Int) -> Unit) {
+            onHome: () -> Unit, onOpen: (List<File>, Int) -> Unit) {
     val first = remember { FocusRequester() }
-    LaunchedEffect(Unit) { delay(100); try { first.requestFocus() } catch (_: Exception) {} }
+    LaunchedEffect(Unit) { delay(150); try { first.requestFocus() } catch (_: Exception) {} }
     var items by remember(sec, dir) { mutableStateOf<List<File>?>(null) }
     LaunchedEffect(sec, dir) {
         items = withContext(Dispatchers.IO) {
@@ -225,64 +370,67 @@ fun Browser(name: String, root: File, sec: Sec, dir: File, onSec: (Sec) -> Unit,
             else scan(root, sec.kind)
         }
     }
-    Row(Modifier.fillMaxSize().aurora()) {
-        Column(Modifier.width(290.dp).fillMaxHeight().background(Color(0xFF10131A)).padding(22.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Logo(44); Text("Flash Player", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+    val list = items
+    Window("Flash Explorer  —  $name") {
+        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Tbtn("back", "بازگشت") { if (sec == Sec.ALL && dir != root) onDir(dir.parentFile!!) else onHome() }
+            Tbtn("home", "این رایانه") { onHome() }
+            val path = if (sec == Sec.ALL) name + dir.relativeTo(root).path.let { if (it.isEmpty()) "" else "  ›  " + it.replace("/", "  ›  ") } else "$name  ›  ${sec.label}"
+            Row(Modifier.weight(1f).clip(RoundedCornerShape(4.dp)).background(Bg).border(1.dp, Line, RoundedCornerShape(4.dp)).padding(horizontal = 14.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Glyph(Kind.DIR, 18.dp); Spacer(Modifier.width(10.dp)); Text(path, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Text("💾 $name", color = Dim, fontSize = 15.sp, maxLines = 1, modifier = Modifier.padding(bottom = 18.dp))
-            Sec.values().forEach { s -> SideItem("${s.icon}   ${s.label}", s == sec, if (s == sec) first else null) { onSec(s) } }
-            Spacer(Modifier.weight(1f))
-            SideItem("⏏   تغییر فلش", false, null, onChange)
         }
-        Column(Modifier.weight(1f).fillMaxHeight().padding(horizontal = 32.dp, vertical = 24.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(sec.label, fontSize = 34.sp, fontWeight = FontWeight.Bold); Clock()
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
+        Row(Modifier.weight(1f).fillMaxWidth()) {
+            Column(Modifier.width(250.dp).fillMaxHeight().background(Bar).padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("دسترسی سریع", color = Dim, fontSize = 13.sp, modifier = Modifier.padding(8.dp))
+                Sec.values().forEach { s -> NavItem(s.kind ?: Kind.DIR, s.label, s == sec, if (s == sec) first else null) { onSec(s) } }
+                Spacer(Modifier.height(14.dp))
+                Text("این رایانه", color = Dim, fontSize = 13.sp, modifier = Modifier.padding(8.dp))
+                NavItem(null, name, false) { onHome() }
             }
-            val path = if (sec == Sec.ALL) "/" + dir.relativeTo(root).path else "همه پوشه‌ها"
-            Text("$path   •   ${items?.size ?: "…"} مورد", color = Dim, fontSize = 15.sp, maxLines = 1, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
-            val list = items
-            if (list == null) Text("در حال بارگذاری…", color = Dim, fontSize = 20.sp)
-            else if (list.isEmpty() && dir == root) Text("چیزی پیدا نشد", color = Dim, fontSize = 20.sp)
-            else if (sec == Sec.VIDEO || sec == Sec.IMAGE) {
-                LazyVerticalGrid(GridCells.Adaptive(210.dp), horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(8.dp)) {
-                    itemsIndexed(list) { i, f ->
-                        Column(Modifier.enter(i).tv { onOpen(list, i) }.padding(10.dp)) {
-                            Thumb(f, Modifier.fillMaxWidth().aspectRatio(1.6f).clip(RoundedCornerShape(12.dp)), 44)
-                            Text(f.name, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
+            Box(Modifier.width(1.dp).fillMaxHeight().background(Line))
+            Column(Modifier.weight(1f).fillMaxHeight().padding(12.dp)) {
+                if (list == null) Text("در حال بارگذاری…", color = Dim, fontSize = 18.sp, modifier = Modifier.padding(16.dp))
+                else if (list.isEmpty()) Text("این پوشه خالی است", color = Dim, fontSize = 18.sp, modifier = Modifier.padding(16.dp))
+                else if (sec == Sec.VIDEO || sec == Sec.IMAGE) {
+                    LazyVerticalGrid(GridCells.Adaptive(200.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(6.dp)) {
+                        itemsIndexed(list) { i, f ->
+                            Column(Modifier.enter(i).tv(grow = true) { onOpen(list, i) }.padding(8.dp)) {
+                                Thumb(f, Modifier.fillMaxWidth().aspectRatio(1.6f).clip(RoundedCornerShape(4.dp)))
+                                Text(f.name, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 7.dp))
+                            }
+                        }
+                    }
+                } else {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        Text("نام", color = Dim, fontSize = 13.sp, modifier = Modifier.weight(1f).padding(start = 54.dp))
+                        Text("تاریخ تغییر", color = Dim, fontSize = 13.sp, modifier = Modifier.width(190.dp))
+                        Text("نوع", color = Dim, fontSize = 13.sp, modifier = Modifier.width(110.dp))
+                        Text("اندازه", color = Dim, fontSize = 13.sp, modifier = Modifier.width(100.dp))
+                    }
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp), contentPadding = PaddingValues(vertical = 6.dp)) {
+                        itemsIndexed(list) { n, f ->
+                            Row(Modifier.fillMaxWidth().enter(n).tv {
+                                val k = f.kind()
+                                if (k == Kind.DIR) onDir(f)
+                                else if (k != Kind.OTHER) { val pl = list.filter { it.kind() == k }; onOpen(pl, pl.indexOf(f)) }
+                            }.padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Thumb(f, Modifier.size(40.dp).clip(RoundedCornerShape(4.dp))); Spacer(Modifier.width(14.dp))
+                                Text(f.name, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                Text(dateOf(f), color = Dim, fontSize = 14.sp, modifier = Modifier.width(190.dp))
+                                Text(if (f.isDirectory) "پوشه" else f.extension.uppercase() + " فایل", color = Dim, fontSize = 14.sp, maxLines = 1, modifier = Modifier.width(110.dp))
+                                Text(if (f.isDirectory) "" else fmtSize(f.length()), color = Dim, fontSize = 14.sp, modifier = Modifier.width(100.dp))
+                            }
                         }
                     }
                 }
-            } else LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(8.dp)) {
-                if (sec == Sec.ALL && dir != root) item {
-                    Text("⬆️   بازگشت به پوشه بالاتر", fontSize = 20.sp, modifier = Modifier.fillMaxWidth().tv { onDir(dir.parentFile!!) }.padding(20.dp))
-                }
-                itemsIndexed(list) { n, f ->
-                    FileRow(f, n) {
-                        val k = f.kind()
-                        if (k == Kind.DIR) onDir(f)
-                        else if (k != Kind.OTHER) {
-                            val pl = list.filter { it.kind() == k }
-                            onOpen(pl, pl.indexOf(f))
-                        }
-                    }
-                }
             }
         }
-    }
-}
-
-@Composable
-fun FileRow(f: File, idx: Int, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().enter(idx).tv(onClick = onClick).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-        Thumb(f, Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)), 30)
-        Spacer(Modifier.width(18.dp))
-        Column(Modifier.weight(1f)) {
-            Text(f.name, fontSize = 20.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(detail(f), color = Dim, fontSize = 14.sp, modifier = Modifier.padding(top = 3.dp))
-        }
-        Text(f.kind().label, color = Cyan, fontSize = 15.sp)
+        StatusBar("${list?.size ?: "…"} مورد")
     }
 }
 
@@ -299,9 +447,23 @@ fun VideoScreen(list: List<File>, start: Int) {
 }
 
 @Composable
-fun Ctl(label: String, big: Boolean = false, onClick: () -> Unit) {
-    Text(label, fontSize = if (big) 34.sp else 24.sp, textAlign = TextAlign.Center,
-        modifier = Modifier.tv(if (big) Accent else CardC, RoundedCornerShape(50), onClick).padding(horizontal = if (big) 40.dp else 26.dp, vertical = 14.dp))
+fun Ctl(icon: String, primary: Boolean = false, active: Boolean = true, onClick: () -> Unit) {
+    val sh = RoundedCornerShape(8.dp)
+    Box(Modifier.size(if (primary) 68.dp else 52.dp).tv(Bar, sh, onClick = onClick)
+        .border(if (primary) 2.dp else 1.dp, if (primary) Color.White else Line, sh), contentAlignment = Alignment.Center) {
+        Ico(icon, if (primary) 34.dp else 26.dp, if (active) Color.White else Dim)
+    }
+}
+
+@Composable
+fun Eq(on: Boolean) {
+    val t = rememberInfiniteTransition(label = "eq")
+    Row(Modifier.height(44.dp).padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.Bottom) {
+        for (i in 0 until 8) {
+            val h by t.animateFloat(0.2f, 1f, infiniteRepeatable(tween(400 + i * 80, easing = LinearEasing), RepeatMode.Reverse), label = "b$i")
+            Box(Modifier.width(7.dp).fillMaxHeight(if (on) h else 0.12f).background(Color.White.copy(alpha = .85f)))
+        }
+    }
 }
 
 fun mmss(ms: Long): String { val s = (ms / 1000).coerceAtLeast(0); return "%d:%02d".format(s / 60, s % 60) }
@@ -314,6 +476,8 @@ fun AudioScreen(list: List<File>, start: Int) {
     var pos by remember { mutableLongStateOf(0L) }
     var dur by remember { mutableLongStateOf(0L) }
     var rot by remember { mutableFloatStateOf(0f) }
+    var shuf by remember { mutableStateOf(false) }
+    var rep by remember { mutableStateOf(false) }
     val p = remember { ExoPlayer.Builder(ctx).build().apply {
         setMediaItems(list.map { MediaItem.fromUri(Uri.fromFile(it)) }); seekTo(start, 0); prepare(); playWhenReady = true
         addListener(object : Player.Listener {
@@ -321,39 +485,67 @@ fun AudioScreen(list: List<File>, start: Int) {
             override fun onIsPlayingChanged(b: Boolean) { playing = b }
         }) } }
     DisposableEffect(Unit) { onDispose { p.release() } }
-    LaunchedEffect(playing) { while (playing) { rot = (rot + 0.6f) % 360f; delay(16) } }
+    LaunchedEffect(playing) { while (playing) { rot = (rot + 0.5f) % 360f; delay(16) } }
     LaunchedEffect(Unit) { while (true) { pos = p.currentPosition; dur = p.duration.coerceAtLeast(0); delay(400) } }
+    val ls = rememberLazyListState()
+    LaunchedEffect(idx) { ls.animateScrollToItem(idx.coerceIn(0, list.lastIndex)) }
     val f = list[idx.coerceIn(0, list.lastIndex)]
-    Box(Modifier.fillMaxSize().aurora().padding(56.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxSize()) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(Modifier.size(280.dp).graphicsLayer { rotationZ = rot }.clip(RoundedCornerShape(50))
-                    .background(Brush.sweepGradient(listOf(Accent, Cyan, Accent, Color(0xFF3B2A8F), Accent))), contentAlignment = Alignment.Center) {
-                    Box(Modifier.size(90.dp).clip(RoundedCornerShape(50)).background(Bg))
-                    Box(Modifier.size(14.dp).clip(RoundedCornerShape(50)).background(Cyan))
+    Window("پخش‌کننده موسیقی") {
+        Row(Modifier.weight(1f).fillMaxWidth()) {
+            Column(Modifier.weight(1f).fillMaxHeight().padding(36.dp), verticalArrangement = Arrangement.Center) {
+                Text("در حال پخش   •   ${idx + 1} از ${list.size}", color = Dim, fontSize = 15.sp)
+                Spacer(Modifier.height(18.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Canvas(Modifier.size(250.dp).graphicsLayer { rotationZ = rot }) {
+                            val r = this.size.minDimension / 2
+                            drawCircle(Color(0xFF0E0E0E), r)
+                            for (i in 1..6) drawCircle(Color(0xFF2E2E2E), r * (0.36f + 0.09f * i), style = Stroke(2f))
+                            drawArc(Color(0x44FFFFFF), -35f, 45f, false, Offset(r * .08f, r * .08f), Size(r * 1.84f, r * 1.84f), style = Stroke(7f))
+                            drawCircle(Color(0xFF8C8C8C), r * .3f); drawCircle(Color(0xFFBDBDBD), r * .3f, style = Stroke(3f)); drawCircle(Bg, r * .05f)
+                        }
+                        Eq(playing)
+                    }
+                    Spacer(Modifier.width(36.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(f.nameWithoutExtension, fontFamily = HeadFont, fontSize = 36.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Row(Modifier.padding(top = 6.dp, bottom = 22.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(f.parentFile?.name ?: "", color = Dim, fontSize = 16.sp, maxLines = 1)
+                            Text("${f.extension.uppercase()}  •  ${fmtSize(f.length())}", color = Ic, fontSize = 12.sp, modifier = Modifier.border(1.dp, Line, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 2.dp))
+                        }
+                        Box(Modifier.fillMaxWidth().height(6.dp).background(Line)) { Box(Modifier.fillMaxWidth(if (dur > 0) (pos.toFloat() / dur).coerceIn(0f, 1f) else 0f).fillMaxHeight().background(Color.White)) }
+                        Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(mmss(pos), color = Dim, fontSize = 13.sp); Text(mmss(dur), color = Dim, fontSize = 13.sp)
+                        }
+                        Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Ctl("prev") { p.seekToPreviousMediaItem() }
+                            Ctl("rew") { p.seekTo((p.currentPosition - 10000).coerceAtLeast(0)) }
+                            Ctl(if (playing) "pause" else "play", true) { Sfx.play("play"); if (p.isPlaying) p.pause() else p.play() }
+                            Ctl("ff") { p.seekTo(p.currentPosition + 10000) }
+                            Ctl("next") { p.seekToNextMediaItem() }
+                        }
+                        Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Ctl("shuffle", false, shuf) { shuf = !shuf; p.shuffleModeEnabled = shuf }
+                            Ctl("repeat", false, rep) { rep = !rep; p.repeatMode = if (rep) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF }
+                        }
+                    }
                 }
-                Eq(playing)
             }
-            Spacer(Modifier.width(52.dp))
-            Column(Modifier.weight(1f)) {
-                Text("NOW PLAYING  •  ${idx + 1}/${list.size}", color = Cyan, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                Text(f.nameWithoutExtension, fontSize = 38.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
-                Text(f.parentFile?.name ?: "", color = Dim, fontSize = 18.sp, modifier = Modifier.padding(top = 4.dp, bottom = 28.dp))
-                LinearProgressIndicator(progress = { if (dur > 0) pos.toFloat() / dur else 0f }, color = Cyan, trackColor = Color(0x33FFFFFF),
-                    modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)))
-                Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(mmss(pos), color = Dim, fontSize = 14.sp); Text(mmss(dur), color = Dim, fontSize = 14.sp)
+            Box(Modifier.width(1.dp).fillMaxHeight().background(Line))
+            Column(Modifier.width(360.dp).fillMaxHeight().background(Bar)) {
+                Text("لیست پخش (${list.size})", fontFamily = HeadFont, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
+                Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
+                LazyColumn(state = ls, contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    itemsIndexed(list) { i, t ->
+                        Row(Modifier.fillMaxWidth().tv(base = if (i == idx) Sel else Color.Transparent) { p.seekTo(i, 0); p.play() }.padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(if (i == idx) "▶\uFE0E" else "${i + 1}", color = if (i == idx) Color.White else Dim, fontSize = 13.sp, modifier = Modifier.width(32.dp))
+                            Text(t.nameWithoutExtension, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (i == idx) FontWeight.Bold else FontWeight.Normal)
+                        }
+                    }
                 }
-                Row(Modifier.padding(vertical = 26.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Ctl("⏮") { p.seekToPreviousMediaItem() }
-                    Ctl("−10s") { p.seekTo((p.currentPosition - 10000).coerceAtLeast(0)) }
-                    Ctl(if (playing) "⏸" else "▶", true) { if (p.isPlaying) p.pause() else p.play() }
-                    Ctl("+10s") { p.seekTo(p.currentPosition + 10000) }
-                    Ctl("⏭") { p.seekToNextMediaItem() }
-                }
-                list.drop(idx + 1).take(3).forEach { Text("▸ ${it.nameWithoutExtension}", color = Dim, fontSize = 16.sp, maxLines = 1, modifier = Modifier.padding(vertical = 2.dp)) }
             }
         }
+        StatusBar(if (playing) "در حال پخش" else "مکث")
     }
 }
 
@@ -366,62 +558,16 @@ fun PhotoScreen(list: List<File>, start: Int) {
     LaunchedEffect(auto, i) { if (auto) { delay(4000); i = (i + 1) % list.size } }
     Box(Modifier.fillMaxSize().background(Color.Black).focusRequester(fr).focusable().onKeyEvent {
         if (it.type != KeyEventType.KeyDown) false else when (it.key) {
-            Key.DirectionLeft, Key.MediaNext -> { i = (i + 1) % list.size; true }
-            Key.DirectionRight, Key.MediaPrevious -> { i = (i - 1 + list.size) % list.size; true }
-            Key.DirectionCenter, Key.Enter, Key.MediaPlayPause -> { auto = !auto; true }
+            Key.DirectionLeft, Key.MediaNext -> { Sfx.play("move"); i = (i + 1) % list.size; true }
+            Key.DirectionRight, Key.MediaPrevious -> { Sfx.play("move"); i = (i - 1 + list.size) % list.size; true }
+            Key.DirectionCenter, Key.Enter, Key.MediaPlayPause -> { Sfx.play("play"); auto = !auto; true }
             else -> false
         }
     }) {
         AsyncImage(model = list[i], imageLoader = loader, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
-        Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000)))).padding(28.dp),
-            horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(list[i].name, fontSize = 18.sp, maxLines = 1, modifier = Modifier.weight(1f))
-            Text("${if (auto) "▶ اسلایدشو" else "⏸"}   ${i + 1} / ${list.size}   ◀ ▶", color = Cyan, fontSize = 16.sp)
+        Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0xCC000000)).padding(horizontal = 28.dp, vertical = 14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(list[i].name, fontSize = 16.sp, maxLines = 1, modifier = Modifier.weight(1f))
+            Text("${if (auto) "اسلایدشو روشن" else "OK: اسلایدشو"}     ${i + 1} / ${list.size}", color = Dim, fontSize = 15.sp)
         }
     }
-}
-
-@Composable
-fun Logo(sz: Int, pulse: Boolean = false) {
-    val tr = rememberInfiniteTransition(label = "l")
-    val sc by tr.animateFloat(1f, if (pulse) 1.08f else 1f, infiniteRepeatable(tween(1400, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "s")
-    Box(Modifier.graphicsLayer { scaleX = sc; scaleY = sc }.size(sz.dp).clip(RoundedCornerShape((sz / 4).dp)).background(Brush.linearGradient(listOf(Accent, Cyan))), contentAlignment = Alignment.Center) {
-        Text("▶", fontSize = (sz / 2).sp, color = Color.White)
-    }
-}
-
-@Composable
-fun Clock() {
-    var t by remember { mutableStateOf("") }
-    LaunchedEffect(Unit) { while (true) { t = SimpleDateFormat("HH:mm", Locale.US).format(Date()); delay(10000) } }
-    Text(t, fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Cyan)
-}
-
-@Composable
-fun Eq(on: Boolean) {
-    val t = rememberInfiniteTransition(label = "eq")
-    Row(Modifier.height(60.dp).padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.Bottom) {
-        for (i in 0 until 6) {
-            val h by t.animateFloat(0.2f, 1f, infiniteRepeatable(tween(450 + i * 90, easing = LinearEasing), RepeatMode.Reverse), label = "b$i")
-            Box(Modifier.width(8.dp).fillMaxHeight(if (on) h else 0.15f).clip(RoundedCornerShape(4.dp)).background(Color.White.copy(alpha = .9f)))
-        }
-    }
-}
-
-@Composable
-fun Modifier.aurora(): Modifier {
-    val t = rememberInfiniteTransition(label = "au")
-    val a by t.animateFloat(0f, 1f, infiniteRepeatable(tween(14000, easing = LinearEasing), RepeatMode.Reverse), label = "a")
-    return this.background(Bg).drawBehind {
-        val w = this.size.width; val h = this.size.height
-        drawRect(Brush.radialGradient(listOf(Accent.copy(alpha = .30f), Color.Transparent), center = Offset(w * (0.2f + 0.5f * a), h * 0.1f), radius = w * 0.55f))
-        drawRect(Brush.radialGradient(listOf(Cyan.copy(alpha = .18f), Color.Transparent), center = Offset(w * (0.9f - 0.5f * a), h * 0.95f), radius = w * 0.5f))
-    }
-}
-
-@Composable
-fun Modifier.enter(i: Int): Modifier {
-    val a = remember { Animatable(0f) }
-    LaunchedEffect(Unit) { delay(((i % 8) * 45).toLong()); a.animateTo(1f, tween(450)) }
-    return this.graphicsLayer { alpha = a.value; translationY = (1f - a.value) * 60f }
 }
