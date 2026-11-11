@@ -8,6 +8,8 @@ import android.content.res.AssetManager
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.media.audiofx.Equalizer
+import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -65,6 +67,15 @@ val Line = Color(0xFF3D3D3D); val Sel = Color(0xFF3F3F3F); val Dim = Color(0xFF9
 var HeadFont: FontFamily = FontFamily.Default
 lateinit var loader: ImageLoader
 
+object Pref {
+    private var sp: SharedPreferences? = null
+    var sfx by mutableStateOf(true); private set
+    var eq by mutableStateOf(false); private set
+    fun init(c: Context) { sp = c.getSharedPreferences("prefs", Context.MODE_PRIVATE); sfx = sp!!.getBoolean("sfx", true); eq = sp!!.getBoolean("eq", false) }
+    fun setSfx(b: Boolean) { sfx = b; sp?.edit()?.putBoolean("sfx", b)?.apply() }
+    fun setEq(b: Boolean) { eq = b; sp?.edit()?.putBoolean("eq", b)?.apply() }
+}
+
 // ---------- Sound effects (generated, no files) ----------
 object Sfx {
     private fun tone(f: Float, ms: Int, vol: Float): ShortArray {
@@ -76,6 +87,7 @@ object Sfx {
             "play" to tone(900f, 60, .35f) + tone(1500f, 100, .35f))
     }
     fun play(k: String) {
+        if (!Pref.sfx) return
         val d = snd[k] ?: return
         Thread {
             try {
@@ -89,7 +101,8 @@ object Sfx {
 // ---------- Model ----------
 enum class Kind(val label: String) { DIR("پوشه"), VIDEO("ویدیو"), AUDIO("موسیقی"), IMAGE("تصویر"), OTHER("فایل") }
 enum class Sec(val label: String, val kind: Kind?) { ALL("همه فایل‌ها", null), VIDEO("ویدیوها", Kind.VIDEO), AUDIO("موسیقی", Kind.AUDIO), IMAGE("عکس‌ها", Kind.IMAGE) }
-fun File.kind(): Kind = if (isDirectory) Kind.DIR else when (extension.lowercase()) {
+fun File.kind(): Kind = if (isDirectory) Kind.DIR else extKind(name)
+fun extKind(n: String): Kind = when (n.substringAfterLast('.', "").lowercase()) {
     "mp4", "mkv", "avi", "mov", "webm", "ts", "m4v", "wmv", "3gp", "mpg", "mpeg" -> Kind.VIDEO
     "mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma" -> Kind.AUDIO
     "jpg", "jpeg", "png", "webp", "bmp", "gif" -> Kind.IMAGE
@@ -107,6 +120,10 @@ fun drives(ctx: Context): List<Pair<String, File>> {
         val dir = if (Build.VERSION.SDK_INT >= 30) v.directory else v.uuid?.let { File("/storage/$it") }
         dir?.takeIf { it.exists() }?.let { (v.getDescription(ctx) ?: "USB") to it }
     }
+}
+fun walkSafe(root: File): Sequence<File> = root.walkTopDown().maxDepth(7).onEnter {
+    val n = it.name
+    it == root || !(n.startsWith(".") || n == "Android" || n == "System Volume Information" || n == "LOST.DIR" || n == "Recovery" || n.startsWith("\$RECYCLE"))
 }
 fun scan(root: File, k: Kind): List<File> =
     root.walkTopDown().maxDepth(8).onEnter { !it.name.startsWith(".") && it.name != "Android" }
@@ -131,6 +148,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(s: Bundle?) {
         super.onCreate(s)
         loader = ImageLoader.Builder(applicationContext).components { add(VideoFrameDecoder.Factory()) }.crossfade(true).build()
+        Pref.init(applicationContext)
         askAccess(this)
         val body = fam(assets, "Vazirmatn-Regular.ttf" to FontWeight.Normal, "Vazirmatn-Bold.ttf" to FontWeight.Bold) ?: FontFamily.Default
         HeadFont = fam(assets, "ArefRuqaa-Regular.ttf" to FontWeight.Normal, "ArefRuqaa-Bold.ttf" to FontWeight.Bold) ?: body
@@ -205,6 +223,12 @@ fun Ico(n: String, sz: Dp = 24.dp, c: Color = Color.White) = Canvas(Modifier.siz
             drawCircle(c, w * .08f, Offset(w * .88f, h * .7f)); drawCircle(c, w * .08f, Offset(w * .88f, h * .3f)) }
         "repeat" -> { drawRoundRect(c, Offset(w * .12f, h * .27f), Size(w * .76f, h * .46f), CornerRadius(w * .2f), style = Stroke(sw))
             drawPath(Path().apply { moveTo(w * .62f, h * .1f); lineTo(w * .82f, h * .27f); lineTo(w * .62f, h * .44f); close() }, c) }
+        "volume" -> { drawRect(c, Offset(w * .1f, h * .38f), Size(w * .2f, h * .24f)); drawPath(Path().apply { moveTo(w * .3f, h * .38f); lineTo(w * .52f, h * .2f); lineTo(w * .52f, h * .8f); lineTo(w * .3f, h * .62f); close() }, c)
+            drawArc(c, -45f, 90f, false, Offset(w * .4f, h * .3f), Size(w * .4f, h * .4f), style = Stroke(sw)) }
+        "mute" -> { drawRect(c, Offset(w * .1f, h * .38f), Size(w * .2f, h * .24f)); drawPath(Path().apply { moveTo(w * .3f, h * .38f); lineTo(w * .52f, h * .2f); lineTo(w * .52f, h * .8f); lineTo(w * .3f, h * .62f); close() }, c)
+            drawLine(c, Offset(w * .65f, h * .36f), Offset(w * .92f, h * .64f), sw); drawLine(c, Offset(w * .92f, h * .36f), Offset(w * .65f, h * .64f), sw) }
+        "eq" -> { val ys = listOf(.58f, .3f, .66f)
+            for (i in 0..2) { val x = w * (.2f + .3f * i); drawLine(c, Offset(x, h * .15f), Offset(x, h * .85f), sw * .6f); drawRect(c, Offset(x - w * .1f, h * ys[i]), Size(w * .2f, h * .12f)) } }
         else -> {}
     }
 }
@@ -229,16 +253,18 @@ fun Clock() {
 
 @Composable
 fun Window(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Box(Modifier.fillMaxSize().dots().padding(20.dp)) {
-        Column(Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)).background(Panel).border(1.dp, Line, RoundedCornerShape(10.dp))) {
+    Box(Modifier.fillMaxSize().dots()) {
+        Column(Modifier.fillMaxSize().padding(start = 20.dp, top = 20.dp, end = 20.dp, bottom = 30.dp).clip(RoundedCornerShape(10.dp)).background(Panel).border(1.dp, Line, RoundedCornerShape(10.dp))) {
             Row(Modifier.fillMaxWidth().background(Bar).padding(horizontal = 16.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
                 Glyph(Kind.DIR, 18.dp); Spacer(Modifier.width(10.dp))
                 Text(title, fontFamily = HeadFont, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1)
-                Clock(); Spacer(Modifier.width(18.dp)); Text("—     ▢     ✕", color = Dim, fontSize = 14.sp)
+                Box(Modifier.size(34.dp).tv(Color.Transparent, RoundedCornerShape(6.dp)) { Pref.setSfx(!Pref.sfx) }, contentAlignment = Alignment.Center) { Ico(if (Pref.sfx) "volume" else "mute", 20.dp, if (Pref.sfx) Color.White else Dim) }
+                Spacer(Modifier.width(12.dp)); Clock(); Spacer(Modifier.width(18.dp)); Text("—     ▢     ✕", color = Dim, fontSize = 14.sp)
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
             content()
         }
+        Text("Created By Mohammad Shaerpour", color = Dim.copy(alpha = .7f), fontSize = 10.sp, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp))
     }
 }
 
@@ -247,7 +273,7 @@ fun StatusBar(text: String) {
     Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
     Row(Modifier.fillMaxWidth().background(Bar).padding(horizontal = 16.dp, vertical = 7.dp)) {
         Text(text, color = Dim, fontSize = 13.sp, modifier = Modifier.weight(1f))
-        Text("OK  باز کردن        Back  بازگشت", color = Dim, fontSize = 13.sp)
+        Text("OK  باز کردن        Back  بازگشت", color = Dim, fontSize = 13.sp, textAlign = TextAlign.End, modifier = Modifier.weight(1f))
     }
 }
 
@@ -363,11 +389,33 @@ fun Browser(name: String, root: File, sec: Sec, dir: File, onSec: (Sec) -> Unit,
     val first = remember { FocusRequester() }
     LaunchedEffect(Unit) { delay(150); try { first.requestFocus() } catch (_: Exception) {} }
     var items by remember(sec, dir) { mutableStateOf<List<File>?>(null) }
+    var loading by remember(sec, dir) { mutableStateOf(false) }
     LaunchedEffect(sec, dir) {
-        items = withContext(Dispatchers.IO) {
-            if (sec.kind == null) (dir.listFiles()?.filter { !it.name.startsWith(".") }
-                ?.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() })) ?: emptyList())
-            else scan(root, sec.kind)
+        val target = sec.kind
+        if (target == null) {
+            items = withContext(Dispatchers.IO) {
+                dir.listFiles()?.filter { !it.name.startsWith(".") }
+                    ?.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() })) ?: emptyList()
+            }
+        } else {
+            loading = true; items = emptyList()
+            val acc = ArrayList<File>()
+            try {
+                withContext(Dispatchers.IO) {
+                    var last = System.currentTimeMillis()
+                    for (f in walkSafe(root)) {
+                        ensureActive()
+                        if (extKind(f.name) == target && f.isFile) { acc.add(f); if (acc.size >= 4000) break }
+                        val now = System.currentTimeMillis()
+                        if (now - last > 400) {
+                            last = now
+                            val snap = acc.sortedBy { it.name.lowercase() }
+                            withContext(Dispatchers.Main) { items = snap }
+                        }
+                    }
+                }
+            } catch (e: Exception) { if (e is CancellationException) throw e }
+            items = acc.sortedBy { it.name.lowercase() }; loading = false
         }
     }
     val list = items
@@ -393,7 +441,7 @@ fun Browser(name: String, root: File, sec: Sec, dir: File, onSec: (Sec) -> Unit,
             Box(Modifier.width(1.dp).fillMaxHeight().background(Line))
             Column(Modifier.weight(1f).fillMaxHeight().padding(12.dp)) {
                 if (list == null) Text("در حال بارگذاری…", color = Dim, fontSize = 18.sp, modifier = Modifier.padding(16.dp))
-                else if (list.isEmpty()) Text("این پوشه خالی است", color = Dim, fontSize = 18.sp, modifier = Modifier.padding(16.dp))
+                else if (list.isEmpty()) Text(if (loading) "در حال جستجوی فایل‌ها…  (روی فلش‌های بزرگ کمی طول می‌کشد)" else "این پوشه خالی است", color = Dim, fontSize = 18.sp, modifier = Modifier.padding(16.dp))
                 else if (sec == Sec.VIDEO || sec == Sec.IMAGE) {
                     LazyVerticalGrid(GridCells.Adaptive(200.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(6.dp)) {
@@ -430,7 +478,7 @@ fun Browser(name: String, root: File, sec: Sec, dir: File, onSec: (Sec) -> Unit,
                 }
             }
         }
-        StatusBar("${list?.size ?: "…"} مورد")
+        StatusBar("${list?.size ?: "…"} مورد" + if (loading) "   •   در حال جستجو…" else "")
     }
 }
 
@@ -484,7 +532,10 @@ fun AudioScreen(list: List<File>, start: Int) {
             override fun onMediaItemTransition(m: MediaItem?, r: Int) { idx = currentMediaItemIndex }
             override fun onIsPlayingChanged(b: Boolean) { playing = b }
         }) } }
-    DisposableEffect(Unit) { onDispose { p.release() } }
+    var showEq by remember { mutableStateOf(false) }
+    var eqOn by remember { mutableStateOf(Pref.eq) }
+    val eq = remember { try { Equalizer(0, p.audioSessionId).apply { enabled = Pref.eq } } catch (e: Exception) { null } }
+    DisposableEffect(Unit) { onDispose { try { eq?.release() } catch (_: Exception) {}; p.release() } }
     LaunchedEffect(playing) { while (playing) { rot = (rot + 0.5f) % 360f; delay(16) } }
     LaunchedEffect(Unit) { while (true) { pos = p.currentPosition; dur = p.duration.coerceAtLeast(0); delay(400) } }
     val ls = rememberLazyListState()
@@ -527,12 +578,14 @@ fun AudioScreen(list: List<File>, start: Int) {
                         Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             Ctl("shuffle", false, shuf) { shuf = !shuf; p.shuffleModeEnabled = shuf }
                             Ctl("repeat", false, rep) { rep = !rep; p.repeatMode = if (rep) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF }
+                            Ctl("eq", false, showEq) { showEq = !showEq }
                         }
                     }
                 }
             }
             Box(Modifier.width(1.dp).fillMaxHeight().background(Line))
-            Column(Modifier.width(360.dp).fillMaxHeight().background(Bar)) {
+            if (showEq) EqPanel(eq, eqOn) { eqOn = !eqOn; Pref.setEq(eqOn); try { eq?.enabled = eqOn } catch (_: Exception) {} }
+            else Column(Modifier.width(360.dp).fillMaxHeight().background(Bar)) {
                 Text("لیست پخش (${list.size})", fontFamily = HeadFont, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
                 LazyColumn(state = ls, contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -569,5 +622,45 @@ fun PhotoScreen(list: List<File>, start: Int) {
             Text(list[i].name, fontSize = 16.sp, maxLines = 1, modifier = Modifier.weight(1f))
             Text("${if (auto) "اسلایدشو روشن" else "OK: اسلایدشو"}     ${i + 1} / ${list.size}", color = Dim, fontSize = 15.sp)
         }
+    }
+}
+
+@Composable
+fun EqPanel(eq: Equalizer?, on: Boolean, onToggle: () -> Unit) {
+    Column(Modifier.width(360.dp).fillMaxHeight().background(Bar).padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("اکولایزر", fontFamily = HeadFont, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text(if (on) "روشن" else "خاموش", fontWeight = FontWeight.Bold, fontSize = 15.sp,
+                modifier = Modifier.tv(Bar, RoundedCornerShape(6.dp), onClick = onToggle).border(1.dp, if (on) Color.White else Line, RoundedCornerShape(6.dp)).padding(horizontal = 16.dp, vertical = 7.dp))
+        }
+        if (eq == null) { Text("اکولایزر روی این دستگاه پشتیبانی نمی‌شود", color = Dim, fontSize = 14.sp, modifier = Modifier.padding(top = 20.dp)); return@Column }
+        val n = eq.numberOfBands.toInt(); val lo = eq.bandLevelRange[0].toInt(); val hi = eq.bandLevelRange[1].toInt()
+        val lv = remember { mutableStateListOf<Int>().apply { for (i in 0 until n) add(eq.getBandLevel(i.toShort()).toInt()) } }
+        fun set(i: Int, v: Int) { val x = v.coerceIn(lo, hi); lv[i] = x; try { eq.setBandLevel(i.toShort(), x.toShort()) } catch (_: Exception) {} }
+        Row(Modifier.padding(vertical = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf<Pair<String, (Float) -> Float>>("تخت" to { _ -> 0f }, "بیس" to { f -> 0.8f * (1 - f) }, "ووکال" to { f -> 0.7f * sin(PI * f).toFloat() }, "تربل" to { f -> 0.8f * f }).forEach { (name, fn) ->
+                Text(name, fontSize = 14.sp, modifier = Modifier.tv(Bar, RoundedCornerShape(6.dp)) { for (i in 0 until n) set(i, (hi * fn(if (n > 1) i / (n - 1f) else 0f)).toInt()) }
+                    .border(1.dp, Line, RoundedCornerShape(6.dp)).padding(horizontal = 12.dp, vertical = 7.dp))
+            }
+        }
+        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                for (i in 0 until n) {
+                    val hz = eq.getCenterFreq(i.toShort()) / 1000
+                    Row(Modifier.fillMaxWidth().alpha(if (on) 1f else .5f).onKeyEvent {
+                        if (it.type != KeyEventType.KeyDown) false else when (it.key) {
+                            Key.DirectionLeft -> { set(i, lv[i] - 100); true }
+                            Key.DirectionRight -> { set(i, lv[i] + 100); true }
+                            else -> false
+                        }
+                    }.tv(Bar) { }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (hz >= 1000) "%.1f kHz".format(hz / 1000f) else "$hz Hz", color = Dim, fontSize = 12.sp, modifier = Modifier.width(62.dp))
+                        Box(Modifier.weight(1f).height(6.dp).background(Line)) { Box(Modifier.fillMaxWidth(((lv[i] - lo).toFloat() / (hi - lo).coerceAtLeast(1)).coerceIn(0f, 1f)).fillMaxHeight().background(Color.White)) }
+                        Text("%+.0f dB".format(lv[i] / 100f), fontSize = 12.sp, textAlign = TextAlign.End, modifier = Modifier.width(56.dp))
+                    }
+                }
+            }
+        }
+        Text("چپ / راست: کم و زیاد کردن هر باند", color = Dim, fontSize = 12.sp, modifier = Modifier.padding(top = 14.dp))
     }
 }
