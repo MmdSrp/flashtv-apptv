@@ -534,7 +534,7 @@ fun AudioScreen(list: List<File>, start: Int) {
         }) } }
     var showEq by remember { mutableStateOf(false) }
     var eqOn by remember { mutableStateOf(Pref.eq) }
-    val eq = remember { try { Equalizer(0, p.audioSessionId).apply { enabled = Pref.eq } } catch (e: Exception) { null } }
+    val eq = remember { try { Equalizer(0, p.audioSessionId).apply { setEnabled(Pref.eq) } } catch (e: Exception) { null } }
     DisposableEffect(Unit) { onDispose { try { eq?.release() } catch (_: Exception) {}; p.release() } }
     LaunchedEffect(playing) { while (playing) { rot = (rot + 0.5f) % 360f; delay(16) } }
     LaunchedEffect(Unit) { while (true) { pos = p.currentPosition; dur = p.duration.coerceAtLeast(0); delay(400) } }
@@ -584,7 +584,7 @@ fun AudioScreen(list: List<File>, start: Int) {
                 }
             }
             Box(Modifier.width(1.dp).fillMaxHeight().background(Line))
-            if (showEq) EqPanel(eq, eqOn) { eqOn = !eqOn; Pref.setEq(eqOn); try { eq?.enabled = eqOn } catch (_: Exception) {} }
+            if (showEq) EqPanel(eq, eqOn) { eqOn = !eqOn; Pref.setEq(eqOn); try { eq?.setEnabled(eqOn) } catch (_: Exception) {} }
             else Column(Modifier.width(360.dp).fillMaxHeight().background(Bar)) {
                 Text("لیست پخش (${list.size})", fontFamily = HeadFont, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
@@ -638,7 +638,7 @@ fun EqPanel(eq: Equalizer?, on: Boolean, onToggle: () -> Unit) {
         val lv = remember { mutableStateListOf<Int>().apply { for (i in 0 until n) add(eq.getBandLevel(i.toShort()).toInt()) } }
         fun set(i: Int, v: Int) { val x = v.coerceIn(lo, hi); lv[i] = x; try { eq.setBandLevel(i.toShort(), x.toShort()) } catch (_: Exception) {} }
         Row(Modifier.padding(vertical = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf<Pair<String, (Float) -> Float>>("تخت" to { _ -> 0f }, "بیس" to { f -> 0.8f * (1 - f) }, "ووکال" to { f -> 0.7f * sin(PI * f).toFloat() }, "تربل" to { f -> 0.8f * f }).forEach { (name, fn) ->
+            listOf<Pair<String, (Float) -> Float>>("تخت" to { _: Float -> 0f }, "بیس" to { f: Float -> 0.8f * (1 - f) }, "ووکال" to { f: Float -> 0.7f * sin(PI * f.toDouble()).toFloat() }, "تربل" to { f: Float -> 0.8f * f }).forEach { (name, fn) ->
                 Text(name, fontSize = 14.sp, modifier = Modifier.tv(Bar, RoundedCornerShape(6.dp)) { for (i in 0 until n) set(i, (hi * fn(if (n > 1) i / (n - 1f) else 0f)).toInt()) }
                     .border(1.dp, Line, RoundedCornerShape(6.dp)).padding(horizontal = 12.dp, vertical = 7.dp))
             }
