@@ -8,7 +8,6 @@ import android.content.res.AssetManager
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
-import android.media.audiofx.Equalizer
 import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Build
@@ -69,11 +68,16 @@ lateinit var loader: ImageLoader
 
 object Pref {
     private var sp: SharedPreferences? = null
-    var sfx by mutableStateOf(true); private set
-    var eq by mutableStateOf(false); private set
-    fun init(c: Context) { sp = c.getSharedPreferences("prefs", Context.MODE_PRIVATE); sfx = sp!!.getBoolean("sfx", true); eq = sp!!.getBoolean("eq", false) }
-    fun setSfx(b: Boolean) { sfx = b; sp?.edit()?.putBoolean("sfx", b)?.apply() }
-    fun setEq(b: Boolean) { eq = b; sp?.edit()?.putBoolean("eq", b)?.apply() }
+    private val sfxState = mutableStateOf(true)
+    val sfx: Boolean get() = sfxState.value
+    fun init(c: Context) {
+        sp = c.getSharedPreferences("prefs", Context.MODE_PRIVATE)
+        sfxState.value = sp?.getBoolean("sfx", true) ?: true
+    }
+    fun setSfx(b: Boolean) {
+        sfxState.value = b
+        sp?.edit()?.putBoolean("sfx", b)?.apply()
+    }
 }
 
 // ---------- Sound effects (generated, no files) ----------
@@ -227,8 +231,6 @@ fun Ico(n: String, sz: Dp = 24.dp, c: Color = Color.White) = Canvas(Modifier.siz
             drawArc(c, -45f, 90f, false, Offset(w * .4f, h * .3f), Size(w * .4f, h * .4f), style = Stroke(sw)) }
         "mute" -> { drawRect(c, Offset(w * .1f, h * .38f), Size(w * .2f, h * .24f)); drawPath(Path().apply { moveTo(w * .3f, h * .38f); lineTo(w * .52f, h * .2f); lineTo(w * .52f, h * .8f); lineTo(w * .3f, h * .62f); close() }, c)
             drawLine(c, Offset(w * .65f, h * .36f), Offset(w * .92f, h * .64f), sw); drawLine(c, Offset(w * .92f, h * .36f), Offset(w * .65f, h * .64f), sw) }
-        "eq" -> { val ys = listOf(.58f, .3f, .66f)
-            for (i in 0..2) { val x = w * (.2f + .3f * i); drawLine(c, Offset(x, h * .15f), Offset(x, h * .85f), sw * .6f); drawRect(c, Offset(x - w * .1f, h * ys[i]), Size(w * .2f, h * .12f)) } }
         else -> {}
     }
 }
@@ -532,10 +534,7 @@ fun AudioScreen(list: List<File>, start: Int) {
             override fun onMediaItemTransition(m: MediaItem?, r: Int) { idx = currentMediaItemIndex }
             override fun onIsPlayingChanged(b: Boolean) { playing = b }
         }) } }
-    var showEq by remember { mutableStateOf(false) }
-    var eqOn by remember { mutableStateOf(Pref.eq) }
-    val eq = remember { try { Equalizer(0, p.audioSessionId).apply { setEnabled(Pref.eq) } } catch (e: Exception) { null } }
-    DisposableEffect(Unit) { onDispose { try { eq?.release() } catch (_: Exception) {}; p.release() } }
+    DisposableEffect(Unit) { onDispose { p.release() } }
     LaunchedEffect(playing) { while (playing) { rot = (rot + 0.5f) % 360f; delay(16) } }
     LaunchedEffect(Unit) { while (true) { pos = p.currentPosition; dur = p.duration.coerceAtLeast(0); delay(400) } }
     val ls = rememberLazyListState()
@@ -578,14 +577,12 @@ fun AudioScreen(list: List<File>, start: Int) {
                         Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             Ctl("shuffle", false, shuf) { shuf = !shuf; p.shuffleModeEnabled = shuf }
                             Ctl("repeat", false, rep) { rep = !rep; p.repeatMode = if (rep) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF }
-                            Ctl("eq", false, showEq) { showEq = !showEq }
                         }
                     }
                 }
             }
             Box(Modifier.width(1.dp).fillMaxHeight().background(Line))
-            if (showEq) EqPanel(eq, eqOn) { eqOn = !eqOn; Pref.setEq(eqOn); try { eq?.setEnabled(eqOn) } catch (_: Exception) {} }
-            else Column(Modifier.width(360.dp).fillMaxHeight().background(Bar)) {
+            Column(Modifier.width(360.dp).fillMaxHeight().background(Bar)) {
                 Text("لیست پخش (${list.size})", fontFamily = HeadFont, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
                 LazyColumn(state = ls, contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -625,42 +622,3 @@ fun PhotoScreen(list: List<File>, start: Int) {
     }
 }
 
-@Composable
-fun EqPanel(eq: Equalizer?, on: Boolean, onToggle: () -> Unit) {
-    Column(Modifier.width(360.dp).fillMaxHeight().background(Bar).padding(16.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("اکولایزر", fontFamily = HeadFont, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            Text(if (on) "روشن" else "خاموش", fontWeight = FontWeight.Bold, fontSize = 15.sp,
-                modifier = Modifier.tv(Bar, RoundedCornerShape(6.dp), onClick = onToggle).border(1.dp, if (on) Color.White else Line, RoundedCornerShape(6.dp)).padding(horizontal = 16.dp, vertical = 7.dp))
-        }
-        if (eq == null) { Text("اکولایزر روی این دستگاه پشتیبانی نمی‌شود", color = Dim, fontSize = 14.sp, modifier = Modifier.padding(top = 20.dp)); return@Column }
-        val n = eq.numberOfBands.toInt(); val lo = eq.bandLevelRange[0].toInt(); val hi = eq.bandLevelRange[1].toInt()
-        val lv = remember { mutableStateListOf<Int>().apply { for (i in 0 until n) add(eq.getBandLevel(i.toShort()).toInt()) } }
-        fun set(i: Int, v: Int) { val x = v.coerceIn(lo, hi); lv[i] = x; try { eq.setBandLevel(i.toShort(), x.toShort()) } catch (_: Exception) {} }
-        Row(Modifier.padding(vertical = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf<Pair<String, (Float) -> Float>>("تخت" to { _: Float -> 0f }, "بیس" to { f: Float -> 0.8f * (1 - f) }, "ووکال" to { f: Float -> 0.7f * sin(PI * f.toDouble()).toFloat() }, "تربل" to { f: Float -> 0.8f * f }).forEach { (name, fn) ->
-                Text(name, fontSize = 14.sp, modifier = Modifier.tv(Bar, RoundedCornerShape(6.dp)) { for (i in 0 until n) set(i, (hi * fn(if (n > 1) i / (n - 1f) else 0f)).toInt()) }
-                    .border(1.dp, Line, RoundedCornerShape(6.dp)).padding(horizontal = 12.dp, vertical = 7.dp))
-            }
-        }
-        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                for (i in 0 until n) {
-                    val hz = eq.getCenterFreq(i.toShort()) / 1000
-                    Row(Modifier.fillMaxWidth().alpha(if (on) 1f else .5f).onKeyEvent {
-                        if (it.type != KeyEventType.KeyDown) false else when (it.key) {
-                            Key.DirectionLeft -> { set(i, lv[i] - 100); true }
-                            Key.DirectionRight -> { set(i, lv[i] + 100); true }
-                            else -> false
-                        }
-                    }.tv(Bar) { }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (hz >= 1000) "%.1f kHz".format(hz / 1000f) else "$hz Hz", color = Dim, fontSize = 12.sp, modifier = Modifier.width(62.dp))
-                        Box(Modifier.weight(1f).height(6.dp).background(Line)) { Box(Modifier.fillMaxWidth(((lv[i] - lo).toFloat() / (hi - lo).coerceAtLeast(1)).coerceIn(0f, 1f)).fillMaxHeight().background(Color.White)) }
-                        Text("%+.0f dB".format(lv[i] / 100f), fontSize = 12.sp, textAlign = TextAlign.End, modifier = Modifier.width(56.dp))
-                    }
-                }
-            }
-        }
-        Text("چپ / راست: کم و زیاد کردن هر باند", color = Dim, fontSize = 12.sp, modifier = Modifier.padding(top = 14.dp))
-    }
-}
