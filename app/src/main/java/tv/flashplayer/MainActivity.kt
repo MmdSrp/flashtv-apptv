@@ -27,6 +27,7 @@ import androidx.compose.ui.focus.*
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.animation.core.*
@@ -69,14 +70,14 @@ fun File.kind(): Kind = if (isDirectory) Kind.DIR else when (extension.lowercase
     "jpg", "jpeg", "png", "webp", "bmp", "gif" -> Kind.IMAGE
     else -> Kind.OTHER
 }
-fun size(b: Long): String = when {
+fun fmtSize(b: Long): String = when {
     b >= 1L shl 30 -> "%.1f GB".format(b / 1073741824.0)
     b >= 1L shl 20 -> "%.1f MB".format(b / 1048576.0)
     else -> "%d KB".format(b / 1024)
 }
 fun detail(f: File): String {
     val d = SimpleDateFormat("yyyy/MM/dd  HH:mm", Locale.US).format(Date(f.lastModified()))
-    return if (f.isDirectory) d else "${size(f.length())}  •  ${f.extension.uppercase()}  •  $d"
+    return if (f.isDirectory) d else "${fmtSize(f.length())}  •  ${f.extension.uppercase()}  •  $d"
 }
 fun drives(ctx: Context): List<Pair<String, File>> {
     val sm = ctx.getSystemService(StorageManager::class.java)
@@ -166,9 +167,9 @@ fun Home(drv: List<Pair<String, File>>, onPick: (Pair<String, File>) -> Unit) {
     val ctx = LocalContext.current
     val req = remember { FocusRequester() }
     LaunchedEffect(drv.size) { delay(100); try { req.requestFocus() } catch (_: Exception) {} }
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF1B1440), Bg))), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize().aurora(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Logo(96)
+            Logo(96, true)
             Text("Flash Player", fontSize = 48.sp, fontWeight = FontWeight.Bold, color = Color.White, modifier = Modifier.padding(top = 14.dp))
             Text("فلش خود را انتخاب کنید", fontSize = 22.sp, color = Dim, modifier = Modifier.padding(top = 8.dp, bottom = 48.dp))
             if (drv.isEmpty()) {
@@ -179,11 +180,11 @@ fun Home(drv: List<Pair<String, File>>, onPick: (Pair<String, File>) -> Unit) {
                 }
             } else Row(horizontalArrangement = Arrangement.spacedBy(28.dp)) {
                 drv.forEachIndexed { i, d ->
-                    Column(Modifier.width(300.dp).then(if (i == 0) Modifier.focusRequester(req) else Modifier)
+                    Column(Modifier.enter(i).width(300.dp).then(if (i == 0) Modifier.focusRequester(req) else Modifier)
                         .tv(onClick = { onPick(d) }).padding(28.dp)) {
                         Text("💾", fontSize = 56.sp)
                         Text(d.first, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${size(d.second.freeSpace)} آزاد از ${size(d.second.totalSpace)}", color = Dim, fontSize = 15.sp, modifier = Modifier.padding(vertical = 8.dp))
+                        Text("${fmtSize(d.second.freeSpace)} آزاد از ${fmtSize(d.second.totalSpace)}", color = Dim, fontSize = 15.sp, modifier = Modifier.padding(vertical = 8.dp))
                         LinearProgressIndicator(progress = { 1f - d.second.freeSpace.toFloat() / d.second.totalSpace.coerceAtLeast(1) },
                             color = Cyan, trackColor = Color(0xFF2A3047), modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)))
                     }
@@ -224,7 +225,7 @@ fun Browser(name: String, root: File, sec: Sec, dir: File, onSec: (Sec) -> Unit,
             else scan(root, sec.kind)
         }
     }
-    Row(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Color(0xFF1E1758), Bg), center = Offset(300f, 0f), radius = 1700f))) {
+    Row(Modifier.fillMaxSize().aurora()) {
         Column(Modifier.width(290.dp).fillMaxHeight().background(Color(0xFF10131A)).padding(22.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Logo(44); Text("Flash Player", fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -247,7 +248,7 @@ fun Browser(name: String, root: File, sec: Sec, dir: File, onSec: (Sec) -> Unit,
                 LazyVerticalGrid(GridCells.Adaptive(210.dp), horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(8.dp)) {
                     itemsIndexed(list) { i, f ->
-                        Column(Modifier.tv { onOpen(list, i) }.padding(10.dp)) {
+                        Column(Modifier.enter(i).tv { onOpen(list, i) }.padding(10.dp)) {
                             Thumb(f, Modifier.fillMaxWidth().aspectRatio(1.6f).clip(RoundedCornerShape(12.dp)), 44)
                             Text(f.name, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
                         }
@@ -257,8 +258,8 @@ fun Browser(name: String, root: File, sec: Sec, dir: File, onSec: (Sec) -> Unit,
                 if (sec == Sec.ALL && dir != root) item {
                     Text("⬆️   بازگشت به پوشه بالاتر", fontSize = 20.sp, modifier = Modifier.fillMaxWidth().tv { onDir(dir.parentFile!!) }.padding(20.dp))
                 }
-                itemsIndexed(list) { _, f ->
-                    FileRow(f) {
+                itemsIndexed(list) { n, f ->
+                    FileRow(f, n) {
                         val k = f.kind()
                         if (k == Kind.DIR) onDir(f)
                         else if (k != Kind.OTHER) {
@@ -273,8 +274,8 @@ fun Browser(name: String, root: File, sec: Sec, dir: File, onSec: (Sec) -> Unit,
 }
 
 @Composable
-fun FileRow(f: File, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().tv(onClick = onClick).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+fun FileRow(f: File, idx: Int, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().enter(idx).tv(onClick = onClick).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
         Thumb(f, Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)), 30)
         Spacer(Modifier.width(18.dp))
         Column(Modifier.weight(1f)) {
@@ -312,6 +313,7 @@ fun AudioScreen(list: List<File>, start: Int) {
     var playing by remember { mutableStateOf(true) }
     var pos by remember { mutableLongStateOf(0L) }
     var dur by remember { mutableLongStateOf(0L) }
+    var rot by remember { mutableFloatStateOf(0f) }
     val p = remember { ExoPlayer.Builder(ctx).build().apply {
         setMediaItems(list.map { MediaItem.fromUri(Uri.fromFile(it)) }); seekTo(start, 0); prepare(); playWhenReady = true
         addListener(object : Player.Listener {
@@ -319,12 +321,18 @@ fun AudioScreen(list: List<File>, start: Int) {
             override fun onIsPlayingChanged(b: Boolean) { playing = b }
         }) } }
     DisposableEffect(Unit) { onDispose { p.release() } }
+    LaunchedEffect(playing) { while (playing) { rot = (rot + 0.6f) % 360f; delay(16) } }
     LaunchedEffect(Unit) { while (true) { pos = p.currentPosition; dur = p.duration.coerceAtLeast(0); delay(400) } }
     val f = list[idx.coerceIn(0, list.lastIndex)]
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF2B1F63), Bg))).padding(56.dp)) {
+    Box(Modifier.fillMaxSize().aurora().padding(56.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxSize()) {
-            Box(Modifier.size(300.dp).clip(RoundedCornerShape(32.dp)).background(Brush.linearGradient(listOf(Accent, Cyan))), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) { Text("🎵", fontSize = 90.sp); Eq(playing) }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(Modifier.size(280.dp).graphicsLayer { rotationZ = rot }.clip(RoundedCornerShape(50))
+                    .background(Brush.sweepGradient(listOf(Accent, Cyan, Accent, Color(0xFF3B2A8F), Accent))), contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(90.dp).clip(RoundedCornerShape(50)).background(Bg))
+                    Box(Modifier.size(14.dp).clip(RoundedCornerShape(50)).background(Cyan))
+                }
+                Eq(playing)
             }
             Spacer(Modifier.width(52.dp))
             Column(Modifier.weight(1f)) {
@@ -374,8 +382,10 @@ fun PhotoScreen(list: List<File>, start: Int) {
 }
 
 @Composable
-fun Logo(sz: Int) {
-    Box(Modifier.size(sz.dp).clip(RoundedCornerShape((sz / 4).dp)).background(Brush.linearGradient(listOf(Accent, Cyan))), contentAlignment = Alignment.Center) {
+fun Logo(sz: Int, pulse: Boolean = false) {
+    val tr = rememberInfiniteTransition(label = "l")
+    val sc by tr.animateFloat(1f, if (pulse) 1.08f else 1f, infiniteRepeatable(tween(1400, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "s")
+    Box(Modifier.graphicsLayer { scaleX = sc; scaleY = sc }.size(sz.dp).clip(RoundedCornerShape((sz / 4).dp)).background(Brush.linearGradient(listOf(Accent, Cyan))), contentAlignment = Alignment.Center) {
         Text("▶", fontSize = (sz / 2).sp, color = Color.White)
     }
 }
@@ -396,4 +406,22 @@ fun Eq(on: Boolean) {
             Box(Modifier.width(8.dp).fillMaxHeight(if (on) h else 0.15f).clip(RoundedCornerShape(4.dp)).background(Color.White.copy(alpha = .9f)))
         }
     }
+}
+
+@Composable
+fun Modifier.aurora(): Modifier {
+    val t = rememberInfiniteTransition(label = "au")
+    val a by t.animateFloat(0f, 1f, infiniteRepeatable(tween(14000, easing = LinearEasing), RepeatMode.Reverse), label = "a")
+    return this.background(Bg).drawBehind {
+        val w = this.size.width; val h = this.size.height
+        drawRect(Brush.radialGradient(listOf(Accent.copy(alpha = .30f), Color.Transparent), center = Offset(w * (0.2f + 0.5f * a), h * 0.1f), radius = w * 0.55f))
+        drawRect(Brush.radialGradient(listOf(Cyan.copy(alpha = .18f), Color.Transparent), center = Offset(w * (0.9f - 0.5f * a), h * 0.95f), radius = w * 0.5f))
+    }
+}
+
+@Composable
+fun Modifier.enter(i: Int): Modifier {
+    val a = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { delay(((i % 8) * 45).toLong()); a.animateTo(1f, tween(450)) }
+    return this.graphicsLayer { alpha = a.value; translationY = (1f - a.value) * 60f }
 }
