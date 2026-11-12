@@ -11,18 +11,41 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
+      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: "8.9" }
-      - name: Download Vazirmatn font
+      - name: Create signing key (first run only)
         run: |
-          mkdir -p app/src/main/assets/fonts
-          B=https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/ttf
-          curl -fL -o app/src/main/assets/fonts/Vazirmatn-Regular.ttf $B/Vazirmatn-Regular.ttf && \
-          curl -fL -o app/src/main/assets/fonts/Vazirmatn-Bold.ttf $B/Vazirmatn-Bold.ttf || rm -f app/src/main/assets/fonts/*
-      - run: gradle assembleDebug --no-daemon
+          if [ ! -f app/release.jks ]; then
+            keytool -genkeypair -keystore app/release.jks -storepass flashtv123 -keypass flashtv123 -alias flashtv -keyalg RSA -keysize 2048 -validity 12000 -dname "CN=FlashTV"
+            git config user.name github-actions; git config user.email actions@github.com
+            git add app/release.jks && git commit -m "add signing key [skip ci]" && git push || true
+          fi
+      - name: Download fonts
+        run: |
+          D=app/src/main/assets/fonts; mkdir -p $D
+          V=https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/fonts/ttf
+          G=https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/arefruqaa
+          curl -fL -o $D/Vazirmatn-Regular.ttf $V/Vazirmatn-Regular.ttf && curl -fL -o $D/Vazirmatn-Bold.ttf $V/Vazirmatn-Bold.ttf || rm -f $D/Vazirmatn*
+          curl -fL -o $D/ArefRuqaa-Regular.ttf $G/ArefRuqaa-Regular.ttf && curl -fL -o $D/ArefRuqaa-Bold.ttf $G/ArefRuqaa-Bold.ttf || rm -f $D/ArefRuqaa*
+          ls -la $D
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle assembleDebug -PghRepo=${{ github.repository }} -PbuildNum=${{ github.run_number }} --no-daemon --stacktrace 2>&1 | tee build.log || { echo '### Compile errors' >> $GITHUB_STEP_SUMMARY; grep -E '^e: |What went wrong' -A3 build.log | head -60 >> $GITHUB_STEP_SUMMARY; exit 1; }
       - run: cp app/build/outputs/apk/debug/app-debug.apk FlashTV.apk
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
           name: Flash Player v${{ github.run_number }}
           files: FlashTV.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FlashTV-apk
+          path: FlashTV.apk
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: build.log
