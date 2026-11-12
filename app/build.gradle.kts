@@ -1,6 +1,6 @@
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
-val buildNum = (project.findProperty("buildNum") as String?)?.toIntOrNull() ?: 1
-val ghRepo = (project.findProperty("ghRepo") as String?) ?: ""
+val buildNum = (project.findProperty("buildNum") as String?)?.toIntOrNull() ?: System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+val ghRepo = (project.findProperty("ghRepo") as String?) ?: System.getenv("GITHUB_REPOSITORY") ?: "MmdSrp/flashtv-apptv"
 val ks = file("release.jks")
 android {
     namespace = "tv.flashplayer"

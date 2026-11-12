@@ -65,6 +65,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.PI
 import kotlin.math.sin
+import kotlin.math.exp
 
 // ---------- Theme: flat dark gray + white ----------
 val Bg = Color(0xFF191919); val Panel = Color(0xFF242424); val Bar = Color(0xFF2D2D2D)
@@ -96,8 +97,20 @@ object Sfx {
         val n = 44100 * ms / 1000; var ph = 0.0
         return ShortArray(n) { i -> ph += 2 * PI * (f0 + (f1 - f0) * i / n) / 44100; (sin(ph) * Short.MAX_VALUE * vol * sin(PI * i / n)).toInt().toShort() }
     }
+    private fun chime(): ShortArray {
+        val sr = 44100; val out = FloatArray(sr * 1200 / 1000)
+        listOf(523.25f, 659.25f, 783.99f, 1046.5f).forEachIndexed { k, f ->
+            val st = sr * k * 180 / 1000
+            for (i in 0 until sr * 750 / 1000) {
+                val idx = st + i; if (idx >= out.size) break
+                val t = i / sr.toFloat(); val env = exp(-5.0f * t) * minOf(1f, i / 250f)
+                out[idx] += (sin(2 * PI * f * t) + 0.35 * sin(4 * PI * f * t)).toFloat() * env * 0.22f
+            }
+        }
+        return ShortArray(out.size) { (out[it].coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort() }
+    }
     private val snd: Map<String, ShortArray> by lazy {
-        mapOf("move" to tone(1100f, 22, .12f), "ok" to tone(1400f, 70, .35f), "back" to tone(700f, 90, .35f), "whoosh" to sweep(250f, 1400f, 800, .3f),
+        mapOf("move" to tone(1100f, 22, .12f), "ok" to tone(1400f, 70, .35f), "back" to tone(700f, 90, .35f), "whoosh" to chime(),
             "play" to tone(900f, 60, .35f) + tone(1500f, 100, .35f))
     }
     fun play(k: String) {
@@ -115,23 +128,39 @@ object Sfx {
 // ---------- Updater (GitHub Releases) ----------
 object Upd {
     data class Info(val code: Int, val name: String, val url: String)
+    var lastErr = ""
+    private val repo: String get() = BuildConfig.GH_REPO.ifBlank { "MmdSrp/flashtv-apptv" }
+    private fun fromRedirect(): Info {
+        val c = URL("https://github.com/$repo/releases/latest").openConnection() as HttpURLConnection
+        c.instanceFollowRedirects = false; c.connectTimeout = 8000; c.readTimeout = 8000
+        c.setRequestProperty("User-Agent", "FlashTV")
+        val loc = c.getHeaderField("Location") ?: throw Exception("HTTP ${c.responseCode}")
+        val tag = loc.substringAfterLast("/tag/", "")
+        val code = tag.filter { it.isDigit() }.toIntOrNull() ?: throw Exception("tag not found")
+        return Info(code, tag, "https://github.com/$repo/releases/download/$tag/FlashTV.apk")
+    }
+    private fun fromApi(): Info {
+        val c = URL("https://api.github.com/repos/$repo/releases/latest").openConnection() as HttpURLConnection
+        c.connectTimeout = 8000; c.readTimeout = 8000
+        c.setRequestProperty("Accept", "application/vnd.github+json"); c.setRequestProperty("User-Agent", "FlashTV")
+        val j = JSONObject(c.inputStream.bufferedReader().readText())
+        val tag = j.getString("tag_name"); val code = tag.filter { it.isDigit() }.toIntOrNull() ?: throw Exception("tag not found")
+        val a = j.getJSONArray("assets"); var url = ""
+        for (i in 0 until a.length()) { val o = a.getJSONObject(i); if (o.getString("name").endsWith(".apk")) url = o.getString("browser_download_url") }
+        if (url.isEmpty()) throw Exception("apk not found")
+        return Info(code, tag, url)
+    }
     fun latest(): Info? {
-        return try {
-            if (BuildConfig.GH_REPO.isBlank()) return null
-            val c = URL("https://api.github.com/repos/${BuildConfig.GH_REPO}/releases/latest").openConnection() as HttpURLConnection
-            c.connectTimeout = 8000; c.readTimeout = 8000; c.setRequestProperty("Accept", "application/vnd.github+json")
-            val j = JSONObject(c.inputStream.bufferedReader().readText())
-            val tag = j.getString("tag_name"); val code = tag.filter { it.isDigit() }.toIntOrNull()
-            val a = j.getJSONArray("assets"); var url = ""
-            for (i in 0 until a.length()) { val o = a.getJSONObject(i); if (o.getString("name").endsWith(".apk")) url = o.getString("browser_download_url") }
-            if (code != null && url.isNotEmpty()) Info(code, "v$code", url) else null
-        } catch (e: Exception) { null }
+        lastErr = ""
+        try { return fromRedirect() } catch (e: Exception) { lastErr = e.message ?: e.javaClass.simpleName }
+        try { return fromApi() } catch (e: Exception) { lastErr = e.message ?: e.javaClass.simpleName }
+        return null
     }
     fun download(ctx: Context, url: String, prog: (Int) -> Unit): File? {
         return try {
             val out = File(File(ctx.cacheDir, "updates").apply { mkdirs() }, "FlashTV.apk")
             val c = URL(url).openConnection() as HttpURLConnection
-            c.connectTimeout = 10000; c.readTimeout = 20000
+            c.connectTimeout = 10000; c.readTimeout = 20000; c.setRequestProperty("User-Agent", "FlashTV")
             val total = c.contentLengthLong
             c.inputStream.use { inp -> out.outputStream().use { o ->
                 val buf = ByteArray(65536); var done = 0L; var last = -1
@@ -142,7 +171,7 @@ object Upd {
                 }
             } }
             out
-        } catch (e: Exception) { null }
+        } catch (e: Exception) { lastErr = e.message ?: e.javaClass.simpleName; null }
     }
 }
 
@@ -333,26 +362,44 @@ fun Splash(onDone: () -> Unit) {
     val prog = remember { Animatable(0f) }
     val exit = remember { Animatable(0f) }
     val tr = rememberInfiniteTransition(label = "ring")
-    val ring by tr.animateFloat(0f, 1f, infiniteRepeatable(tween(1700, easing = LinearEasing)), label = "r")
+    val ring by tr.animateFloat(0f, 1f, infiniteRepeatable(tween(2000, easing = LinearEasing)), label = "r")
     LaunchedEffect(Unit) {
-        Sfx.play("play"); prog.animateTo(1f, tween(2400, easing = FastOutSlowInEasing))
-        delay(250); Sfx.play("whoosh"); exit.animateTo(1f, tween(1000, easing = FastOutSlowInEasing)); onDone()
+        Sfx.play("play"); prog.animateTo(1f, tween(3200, easing = FastOutSlowInEasing))
+        delay(1800); Sfx.play("whoosh"); exit.animateTo(1f, tween(1500, easing = FastOutSlowInEasing)); onDone()
     }
+    fun rv(a: Float, b: Float) = ((prog.value - a) / (b - a)).coerceIn(0f, 1f)
     val st = if (prog.value < .35f) "در حال آماده‌سازی…" else if (prog.value < .75f) "بارگذاری رابط کاربری…" else "آماده است"
     Box(Modifier.fillMaxSize().graphicsLayer { translationX = -exit.value * size.width * .6f; alpha = 1f - ((exit.value - .45f) / .55f).coerceIn(0f, 1f) }.dots()) {
         Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
             Box(contentAlignment = Alignment.Center) {
-                Canvas(Modifier.size(190.dp)) { drawCircle(Color.White.copy(alpha = (1f - ring) * .25f), this.size.minDimension / 2 * (0.5f + 0.5f * ring), style = Stroke(2f)) }
-                Box(Modifier.graphicsLayer { alpha = (prog.value * 3f).coerceAtMost(1f); scaleX = .8f + .2f * prog.value; scaleY = .8f + .2f * prog.value }
+                Canvas(Modifier.size(210.dp)) {
+                    val r = this.size.minDimension / 2
+                    drawCircle(Color.White.copy(alpha = (1f - ring) * .25f), r * (0.45f + 0.55f * ring), style = Stroke(2f))
+                    val r2 = (ring + .5f) % 1f
+                    drawCircle(Color.White.copy(alpha = (1f - r2) * .15f), r * (0.45f + 0.55f * r2), style = Stroke(2f))
+                }
+                Box(Modifier.graphicsLayer { alpha = (prog.value * 4f).coerceAtMost(1f); scaleX = .8f + .2f * prog.value; scaleY = .8f + .2f * prog.value }
                     .size(100.dp).border(3.dp, Color.White, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
                     Text("▶\uFE0E", fontSize = 46.sp, color = Color.White)
                 }
             }
-            Text("Flash Explorer", fontFamily = HeadFont, fontSize = 56.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 10.dp))
-            Text("توسط تیم شاعرپور", fontFamily = HeadFont, fontSize = 34.sp, fontWeight = FontWeight.Bold, color = Ic, modifier = Modifier.padding(top = 2.dp))
-            Text("مرورگر فایل فلش برای تلویزیون", color = Dim, fontSize = 16.sp, modifier = Modifier.padding(top = 6.dp, bottom = 30.dp))
-            Box(Modifier.width(380.dp).height(4.dp).background(Line)) { Box(Modifier.fillMaxWidth(prog.value).fillMaxHeight().background(Color.White)) }
+            Text("Flash Explorer", fontFamily = HeadFont, fontSize = 58.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 8.dp).graphicsLayer { alpha = rv(.05f, .25f); translationY = (1f - rv(.05f, .25f)) * 30f })
+            Text("توسط تیم شاعرپور", fontFamily = HeadFont, fontSize = 36.sp, fontWeight = FontWeight.Bold, color = Ic,
+                modifier = Modifier.graphicsLayer { alpha = rv(.2f, .4f); translationY = (1f - rv(.2f, .4f)) * 30f })
+            Text("مرورگر فایل فلش برای تلویزیون", color = Dim, fontSize = 17.sp,
+                modifier = Modifier.padding(top = 6.dp).graphicsLayer { alpha = rv(.35f, .5f); translationY = (1f - rv(.35f, .5f)) * 20f })
+            Row(Modifier.padding(top = 22.dp, bottom = 28.dp).graphicsLayer { alpha = rv(.45f, .65f); translationY = (1f - rv(.45f, .65f)) * 20f },
+                horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                listOf(Kind.VIDEO to "ویدیو", Kind.AUDIO to "موسیقی", Kind.IMAGE to "عکس", Kind.DIR to "فایل‌ها").forEach { (k, t) ->
+                    Row(Modifier.border(1.dp, Line, RoundedCornerShape(20.dp)).padding(horizontal = 14.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Glyph(k, 18.dp); Spacer(Modifier.width(8.dp)); Text(t, fontSize = 14.sp)
+                    }
+                }
+            }
+            Box(Modifier.width(400.dp).height(4.dp).background(Line)) { Box(Modifier.fillMaxWidth(prog.value).fillMaxHeight().background(Color.White)) }
             Text(st, color = Dim, fontSize = 14.sp, modifier = Modifier.padding(top = 12.dp))
+            Text("نسخه ${BuildConfig.VERSION_NAME}", color = Dim.copy(alpha = .7f), fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
         }
         Text("Created By Mohammad Shaerpour", color = Dim, fontSize = 13.sp, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 26.dp))
     }
@@ -374,7 +421,7 @@ fun App() {
     fun check(manual: Boolean) { scope.launch {
         updMsg = if (manual) "در حال بررسی…" else ""
         val i = withContext(Dispatchers.IO) { Upd.latest() }
-        if (i == null) updMsg = if (manual) "بررسی ناموفق بود (اینترنت یا عمومی بودن ریپو را چک کنید)" else ""
+        if (i == null) updMsg = if (manual) "بررسی ناموفق بود: ${Upd.lastErr}" else ""
         else if (i.code > BuildConfig.VERSION_CODE) { upd = i; updMsg = "نسخه جدید ${i.name} آماده است" }
         else { upd = null; updMsg = if (manual) "برنامه به‌روز است" else "" }
     } }
@@ -387,7 +434,7 @@ fun App() {
         }
         updMsg = "در حال دانلود…"
         val f = withContext(Dispatchers.IO) { Upd.download(ctx, i.url) { pc -> updMsg = "در حال دانلود ${pc}٪" } }
-        if (f == null) { updMsg = "دانلود ناموفق بود"; return@launch }
+        if (f == null) { updMsg = "دانلود ناموفق بود: ${Upd.lastErr}"; return@launch }
         val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".fp", f)
         act.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK))
